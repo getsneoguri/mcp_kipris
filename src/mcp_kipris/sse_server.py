@@ -185,7 +185,10 @@ def create_starlette_app(mcp_server: Server, *, debug: bool = False) -> Starlett
             stateless=True,
         )
 
-        routes.insert(-1, Mount("/mcp", app=session_manager))
+       async def handle_streamable_http(request: Request):
+            return await session_manager.handle_request(request)
+
+        routes.insert(-1, Route("/mcp", endpoint=handle_streamable_http, methods=["GET", "POST", "DELETE"]))
         logger.info("✅ Streamable HTTP (/mcp) 활성화")
     else:
         logger.warning("⚠️ StreamableHTTPSessionManager 없음 — /mcp 비활성화")

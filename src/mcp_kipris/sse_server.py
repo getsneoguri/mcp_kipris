@@ -1,3 +1,5 @@
+from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+
 import argparse
 import datetime
 import json
@@ -51,7 +53,6 @@ tool_handlers = {}
 
 def add_tool_handler(tool_class: ToolHandler):
     global tool_handlers
-
     tool_handlers[tool_class.name] = tool_class
     logger.info(f"Tool handler added: {tool_class.name}")
 
@@ -85,40 +86,33 @@ async def list_tools() -> list[Tool]:
 
 
 @app.call_tool()
-async def call_tool(tool_name: str, args: dict) -> Sequence[TextContent | ImageContent | EmbeddedResource]:
-    """Handle tool calls for command line run."""
+async def call_tool(name: str, args: dict) -> Sequence[TextContent | ImageContent | EmbeddedResource]:
     if not isinstance(args, dict):
         raise RuntimeError("arguments must be dictionary")
 
-    tool_handler = get_tool_handler(tool_name)
+    tool_handler = get_tool_handler(name)
     if not tool_handler:
-        raise ValueError(f"Unknown tool: {tool_name}")
+        raise ValueError(f"Unknown tool: {name}")
 
     try:
-        # 비동기 메서드(run_tool_async)를 사용하여 타임아웃 및 응답 시간 개선
-        logger.info(f"비동기 실행 시작: {tool_name}")
+        logger.info(f"실행 시작: {name}")
         start_time = datetime.datetime.now()
 
         try:
-            # 먼저 비동기 메서드 시도
             result = await tool_handler.run_tool_async(args)
         except (AttributeError, NotImplementedError) as e:
-            # 비동기 메서드가 없거나 구현되지 않은 경우 동기 메서드로 폴백
-            logger.warning(f"비동기 메서드 실패, 동기 메서드로 폴백: {str(e)}")
+            logger.warning(f"비동기 메서드 실패, 동기 폴백: {str(e)}")
             result = tool_handler.run_tool(args)
 
-        end_time = datetime.datetime.now()
-        elapsed_time = (end_time - start_time).total_seconds()
-        logger.info(f"도구 실행 완료: {tool_name}, 소요시간: {elapsed_time:.2f}초")
-
+        elapsed = (datetime.datetime.now() - start_time).total_seconds()
+        logger.info(f"도구 실행 완료: {name}, {elapsed:.2f}초")
         return result
     except Exception as e:
-        logger.error(f"도구 실행 중 오류 발생: {str(e)}")
-        raise RuntimeError(f"Caught Exception. Error: {str(e)}")
+        logger.error(f"오류: {str(e)}")
+        raise RuntimeError(f"Error: {str(e)}")
 
 
 def tool_to_dict(tool: Tool) -> dict:
-    """Tool 객체를 dictionary로 변환"""
     return {
         "name": tool.name,
         "description": tool.description,
@@ -129,45 +123,38 @@ def tool_to_dict(tool: Tool) -> dict:
 
 
 def content_to_dict(content: TextContent | ImageContent | EmbeddedResource) -> dict:
-    """Content 객체를 dictionary로 변환"""
     if isinstance(content, TextContent):
-        return {
-            "type": "text",
-            "text": content.text,
-            "metadata": content.metadata if hasattr(content, "metadata") else None,
-        }
+        return {"type": "text", "text": content.text, "metadata": None}
     elif isinstance(content, ImageContent):
-        return {
-            "type": "image",
-            "url": content.url,
-            "metadata": content.metadata if hasattr(content, "metadata") else None,
-        }
+        return {"type": "image", "url": content.url, "metadata": None}
     elif isinstance(content, EmbeddedResource):
-        return {
-            "type": "embedded",
-            "url": content.url,
-            "metadata": content.metadata if hasattr(content, "metadata") else None,
-        }
+        return {"type": "embedded", "url": content.url, "metadata": None}
     else:
         raise ValueError(f"Unknown content type: {type(content)}")
 
 
 def create_starlette_app(mcp_server: Server, *, debug: bool = False) -> Starlette:
-    """Create a Starlette application that can serve the provided mcp server with SSE."""
     sse = SseServerTransport("/messages/")
 
+    # Streamable HTTP (for Copilot Studio)
+    session_manager = StreamableHTTPSessionManager(
+        app=mcp_server,
+        event_store=None,
+        stateless=True,
+    )
+
+    async def handle_streamable_http(scope, receive, send):
+        await session_manager.run(scope, receive, send)
+
     async def well_known_mcp(request):
-        body = json.dumps(
-            {
-                "mcpVersion": "2024-01-01",
-                "capabilities": ["sse"],
-                "sse": {
-                    "url": "https://psm.greennuri.info/sse",
-                    "message_url": "https://psm.greennuri.info/messages",
-                },
-            }
-        )
-        # 🔥 핵심: content-length 직접 지정 + charset 지정 + no chunk
+        body = json.dumps({
+            "mcpVersion": "2024-01-01",
+            "capabilities": ["sse"],
+            "sse": {
+                "url": "https://mcp-kipris.onrender.com/sse",
+                "message_url": "https://mcp-kipris.onrender.com/messages",
+            },
+        })
         return Response(
             content=body.encode("utf-8"),
             media_type="application/json; charset=utf-8",
@@ -179,58 +166,33 @@ def create_starlette_app(mcp_server: Server, *, debug: bool = False) -> Starlett
 
     async def handle_sse(request: Request) -> Response:
         try:
-            logger.info("🔗 [SSE] New connection request received")
+            logger.info("SSE 연결 요청")
             async with sse.connect_sse(request.scope, request.receive, request._send) as (read_stream, write_stream):
-                logger.info("✅ [SSE] Connected, running MCP server...")
-                await mcp_server.run(
-                    read_stream,
-                    write_stream,
-                    mcp_server.create_initialization_options(),
-                )
-                logger.info("🔥 MCP server run() completed")
-            logger.info("🔌 [SSE] Disconnected cleanly")
+                await mcp_server.run(read_stream, write_stream, mcp_server.create_initialization_options())
             return Response(status_code=204)
         except Exception as e:
-            logger.error(f"❌ [SSE] Connection error: {str(e)}")
+            logger.error(f"SSE 오류: {str(e)}")
             return Response(status_code=500)
 
-    async def list_tools(request: Request) -> JSONResponse:
-        """도구 목록을 JSON 형식으로 반환하는 엔드포인트"""
+    async def list_tools_endpoint(request: Request) -> JSONResponse:
         tools = [tool.get_tool_description() for tool in tool_handlers.values()]
-        tool_dicts = [tool_to_dict(tool) for tool in tools]
-        return JSONResponse(tool_dicts)
+        return JSONResponse([tool_to_dict(t) for t in tools])
 
     async def handle_post_message(request: Request) -> Response:
-        """메시지를 처리하는 엔드포인트"""
         try:
             body = await request.json()
-            logger.debug(f"Received message: {body}")
-
             if not isinstance(body, dict):
-                logger.error(f"Message is not a dictionary: {body}")
                 return Response(status_code=400, content="Message must be a dictionary")
-
-            message_type = body.get("type")
-            if message_type != "tool":
-                logger.error(f"Invalid message type: {message_type}")
+            if body.get("type") != "tool":
                 return Response(status_code=400, content="Invalid message type")
-
             tool_name = body.get("name")
             if not tool_name:
-                logger.error("Tool name is missing")
                 return Response(status_code=400, content="Tool name is required")
-
             args = body.get("args", {})
-            if not isinstance(args, dict):
-                logger.error(f"Arguments must be a dictionary: {args}")
-                return Response(status_code=400, content="Arguments must be a dictionary")
-
-            logger.info(f"Processing tool call: {tool_name} with args: {args}")
             result = await call_tool(tool_name, args)
-            result_dicts = [content_to_dict(content) for content in result]
-            return JSONResponse(result_dicts)
+            return JSONResponse([content_to_dict(c) for c in result])
         except Exception as e:
-            logger.error(f"Error processing message: {str(e)}")
+            logger.error(f"메시지 처리 오류: {str(e)}")
             return Response(status_code=500, content=f"Error: {str(e)}")
 
     return Starlette(
@@ -239,7 +201,8 @@ def create_starlette_app(mcp_server: Server, *, debug: bool = False) -> Starlett
             Route("/.well-known/mcp", endpoint=well_known_mcp),
             Route("/sse", endpoint=handle_sse),
             Route("/sse/", endpoint=handle_sse),
-            Route("/tools", endpoint=list_tools),
+            Route("/tools", endpoint=list_tools_endpoint),
+            Mount("/mcp", app=handle_streamable_http),
             Mount("/messages/", app=sse.handle_post_message),
         ],
     )
@@ -248,38 +211,22 @@ def create_starlette_app(mcp_server: Server, *, debug: bool = False) -> Starlett
 async def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--http", action="store_true", help="Run in HTTP mode")
-    parser.add_argument("--port", type=int, default=6274, help="Port to listen on (default: 6274)")
-    parser.add_argument("--host", default="0.0.0.0", help="Host to bind to (default: 0.0.0.0)")
+    parser.add_argument("--port", type=int, default=6274, help="Port (default: 6274)")
+    parser.add_argument("--host", default="0.0.0.0", help="Host (default: 0.0.0.0)")
     args = parser.parse_args()
 
-    logger.info(f"🚀 argparse received: {args}")
-
     if args.http:
-        logger.info(f"Starting MCP KIPRIS HTTP server on {args.host}:{args.port}...")
-        try:
-            logger.info("🌐 Starting MCP KIPRIS SSE server...")
-            starlette_app = create_starlette_app(app, debug=True)
-            config = uvicorn.Config(app=starlette_app, host=args.host, port=args.port)
-            server = uvicorn.Server(config=config)
-            await server.serve()
-
-        except Exception as e:
-            logger.error(f"SSE server error occurred: {str(e)}")
-            raise RuntimeError(f"SSE Server Error: {str(e)}")
+        logger.info(f"HTTP 서버 시작: {args.host}:{args.port}")
+        starlette_app = create_starlette_app(app, debug=True)
+        config = uvicorn.Config(app=starlette_app, host=args.host, port=args.port)
+        server = uvicorn.Server(config)
+        await server.serve()
     else:
-        logger.info("Starting MCP KIPRIS stdio server...")
-        try:
-            async with stdio_server() as (read_stream, write_stream):
-                logger.info("stdio_server initialized")
-                init_options = app.create_initialization_options()
-                logger.info(f"Initialization options created: {init_options}")
-                await app.run(read_stream, write_stream, init_options)
-        except Exception as e:
-            logger.error(f"Error occurred: {str(e)}")
-            raise RuntimeError(f"Caught Exception. Error: {str(e)}")
+        logger.info("stdio 서버 시작")
+        async with stdio_server() as (read_stream, write_stream):
+            await app.run(read_stream, write_stream, app.create_initialization_options())
 
 
 if __name__ == "__main__":
     import asyncio
-
     asyncio.run(main())

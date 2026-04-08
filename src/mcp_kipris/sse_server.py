@@ -18,15 +18,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Mount, Route
 
-try:
-    from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
-    HAS_STREAMABLE = True
-except ImportError:
-    try:
-        from mcp.server.streamable_http import StreamableHTTPSessionManager
-        HAS_STREAMABLE = True
-    except ImportError:
-        HAS_STREAMABLE = False
+
 
 from mcp_kipris.kipris.abc import ToolHandler
 from mcp_kipris.kipris.tools import (
@@ -178,24 +170,7 @@ def create_starlette_app(mcp_server: Server, *, debug: bool = False) -> Starlett
         Mount("/messages/", app=sse.handle_post_message),
     ])
 
-    if HAS_STREAMABLE:
-        session_manager = StreamableHTTPSessionManager(
-            app=mcp_server,
-            event_store=None,
-            stateless=True,
-        )
-
-     async def handle_streamable_http(scope, receive, send):
-            request = Request(scope, receive)
-            response = await session_manager.handle_request(request)
-            await response(scope, receive, send)
-
-        routes.insert(-1, Mount("/mcp", app=handle_streamable_http))
-
-
-        logger.info("✅ Streamable HTTP (/mcp) 활성화")
-    else:
-        logger.warning("⚠️ StreamableHTTPSessionManager 없음 — /mcp 비활성화")
+  
 
     return Starlette(debug=debug, routes=routes)
 

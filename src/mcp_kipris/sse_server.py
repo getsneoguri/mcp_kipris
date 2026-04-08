@@ -186,7 +186,7 @@ def create_starlette_app(mcp_server: Server, *, debug: bool = False) -> Starlett
         )
 
         async def handle_streamable_http(scope, receive, send):
-            await session_manager.run(scope, receive, send)
+    await session_manager.handle_request(scope, receive, send)
 
         routes.insert(-1, Mount("/mcp", app=handle_streamable_http))
         logger.info("✅ Streamable HTTP (/mcp) 활성화")

@@ -1,5 +1,3 @@
-from mcp.server.streamable_http import StreamableHTTPServerTransport
-
 import argparse
 import datetime
 import json
@@ -19,6 +17,16 @@ from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Mount, Route
+
+try:
+    from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+    HAS_STREAMABLE = True
+except ImportError:
+    try:
+        from mcp.server.streamable_http import StreamableHTTPSessionManager
+        HAS_STREAMABLE = True
+    except ImportError:
+        HAS_STREAMABLE = False
 
 from mcp_kipris.kipris.abc import ToolHandler
 from mcp_kipris.kipris.tools import (
@@ -58,10 +66,8 @@ def add_tool_handler(tool_class: ToolHandler):
 
 
 def get_tool_handler(name: str) -> ToolHandler | None:
-    logger.info(f"Tool handler find: {name}")
     if name not in tool_handlers:
         return None
-    logger.info(f"Tool handler found: {name}")
     return tool_handlers[name]
 
 
@@ -81,7 +87,6 @@ add_tool_handler(ForeignPatentInternationalOpenNumberSearchTool())
 
 @app.list_tools()
 async def list_tools() -> list[Tool]:
-    logger.info(f"Tool handler list: {tool_handlers.values()}")
     return [tool.get_tool_description() for tool in tool_handlers.values()]
 
 
@@ -95,17 +100,13 @@ async def call_tool(name: str, args: dict) -> Sequence[TextContent | ImageConten
         raise ValueError(f"Unknown tool: {name}")
 
     try:
-        logger.info(f"실행 시작: {name}")
         start_time = datetime.datetime.now()
-
         try:
             result = await tool_handler.run_tool_async(args)
         except (AttributeError, NotImplementedError) as e:
-            logger.warning(f"비동기 메서드 실패, 동기 폴백: {str(e)}")
             result = tool_handler.run_tool(args)
-
         elapsed = (datetime.datetime.now() - start_time).total_seconds()
-        logger.info(f"도구 실행 완료: {name}, {elapsed:.2f}초")
+        logger.info(f"완료: {name}, {elapsed:.2f}초")
         return result
     except Exception as e:
         logger.error(f"오류: {str(e)}")
@@ -117,34 +118,42 @@ def tool_to_dict(tool: Tool) -> dict:
         "name": tool.name,
         "description": tool.description,
         "input_schema": tool.inputSchema,
-        "output_schema": tool.outputSchema if hasattr(tool, "outputSchema") else None,
-        "metadata": tool.metadata if hasattr(tool, "metadata") else None,
     }
 
 
-def content_to_dict(content: TextContent | ImageContent | EmbeddedResource) -> dict:
+def content_to_dict(content) -> dict:
     if isinstance(content, TextContent):
-        return {"type": "text", "text": content.text, "metadata": None}
+        return {"type": "text", "text": content.text}
     elif isinstance(content, ImageContent):
-        return {"type": "image", "url": content.url, "metadata": None}
-    elif isinstance(content, EmbeddedResource):
-        return {"type": "embedded", "url": content.url, "metadata": None}
+        return {"type": "image", "url": content.url}
     else:
-        raise ValueError(f"Unknown content type: {type(content)}")
+        return {"type": "embedded", "url": getattr(content, "url", "")}
 
 
 def create_starlette_app(mcp_server: Server, *, debug: bool = False) -> Starlette:
     sse = SseServerTransport("/messages/")
 
-    # Streamable HTTP (for Copilot Studio)
-    session_manager = StreamableHTTPSessionManager(
-        app=mcp_server,
-        event_store=None,
-        stateless=True,
-    )
+    routes = []
 
-    async def handle_streamable_http(scope, receive, send):
-        await session_manager.run(scope, receive, send)
+    async def handle_sse(request: Request) -> Response:
+        try:
+            logger.info("SSE 연결 요청")
+            async with sse.connect_sse(
+                request.scope, request.receive, request._send
+            ) as (read_stream, write_stream):
+                await mcp_server.run(
+                    read_stream,
+                    write_stream,
+                    mcp_server.create_initialization_options(),
+                )
+            return Response(status_code=204)
+        except Exception as e:
+            logger.error(f"SSE 오류: {str(e)}")
+            return Response(status_code=500)
+
+    async def list_tools_endpoint(request: Request) -> JSONResponse:
+        tools = [tool.get_tool_description() for tool in tool_handlers.values()]
+        return JSONResponse([tool_to_dict(t) for t in tools])
 
     async def well_known_mcp(request):
         body = json.dumps({
@@ -158,61 +167,40 @@ def create_starlette_app(mcp_server: Server, *, debug: bool = False) -> Starlett
         return Response(
             content=body.encode("utf-8"),
             media_type="application/json; charset=utf-8",
-            headers={
-                "Content-Length": str(len(body.encode("utf-8"))),
-                "Connection": "close",
-            },
+            headers={"Content-Length": str(len(body.encode("utf-8")))},
         )
 
-    async def handle_sse(request: Request) -> Response:
-        try:
-            logger.info("SSE 연결 요청")
-            async with sse.connect_sse(request.scope, request.receive, request._send) as (read_stream, write_stream):
-                await mcp_server.run(read_stream, write_stream, mcp_server.create_initialization_options())
-            return Response(status_code=204)
-        except Exception as e:
-            logger.error(f"SSE 오류: {str(e)}")
-            return Response(status_code=500)
+    routes.extend([
+        Route("/.well-known/mcp", endpoint=well_known_mcp),
+        Route("/sse", endpoint=handle_sse),
+        Route("/sse/", endpoint=handle_sse),
+        Route("/tools", endpoint=list_tools_endpoint),
+        Mount("/messages/", app=sse.handle_post_message),
+    ])
 
-    async def list_tools_endpoint(request: Request) -> JSONResponse:
-        tools = [tool.get_tool_description() for tool in tool_handlers.values()]
-        return JSONResponse([tool_to_dict(t) for t in tools])
+    if HAS_STREAMABLE:
+        session_manager = StreamableHTTPSessionManager(
+            app=mcp_server,
+            event_store=None,
+            stateless=True,
+        )
 
-    async def handle_post_message(request: Request) -> Response:
-        try:
-            body = await request.json()
-            if not isinstance(body, dict):
-                return Response(status_code=400, content="Message must be a dictionary")
-            if body.get("type") != "tool":
-                return Response(status_code=400, content="Invalid message type")
-            tool_name = body.get("name")
-            if not tool_name:
-                return Response(status_code=400, content="Tool name is required")
-            args = body.get("args", {})
-            result = await call_tool(tool_name, args)
-            return JSONResponse([content_to_dict(c) for c in result])
-        except Exception as e:
-            logger.error(f"메시지 처리 오류: {str(e)}")
-            return Response(status_code=500, content=f"Error: {str(e)}")
+        async def handle_streamable_http(scope, receive, send):
+            await session_manager.run(scope, receive, send)
 
-    return Starlette(
-        debug=debug,
-        routes=[
-            Route("/.well-known/mcp", endpoint=well_known_mcp),
-            Route("/sse", endpoint=handle_sse),
-            Route("/sse/", endpoint=handle_sse),
-            Route("/tools", endpoint=list_tools_endpoint),
-            Mount("/mcp", app=handle_streamable_http),
-            Mount("/messages/", app=sse.handle_post_message),
-        ],
-    )
+        routes.insert(-1, Mount("/mcp", app=handle_streamable_http))
+        logger.info("✅ Streamable HTTP (/mcp) 활성화")
+    else:
+        logger.warning("⚠️ StreamableHTTPSessionManager 없음 — /mcp 비활성화")
+
+    return Starlette(debug=debug, routes=routes)
 
 
 async def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--http", action="store_true", help="Run in HTTP mode")
-    parser.add_argument("--port", type=int, default=6274, help="Port (default: 6274)")
-    parser.add_argument("--host", default="0.0.0.0", help="Host (default: 0.0.0.0)")
+    parser.add_argument("--http", action="store_true")
+    parser.add_argument("--port", type=int, default=6274)
+    parser.add_argument("--host", default="0.0.0.0")
     args = parser.parse_args()
 
     if args.http:
@@ -224,7 +212,11 @@ async def main():
     else:
         logger.info("stdio 서버 시작")
         async with stdio_server() as (read_stream, write_stream):
-            await app.run(read_stream, write_stream, app.create_initialization_options())
+            await app.run(
+                read_stream,
+                write_stream,
+                app.create_initialization_options(),
+            )
 
 
 if __name__ == "__main__":

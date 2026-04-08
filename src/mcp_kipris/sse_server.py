@@ -1,4 +1,4 @@
-from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+from mcp.server.streamable_http import StreamableHTTPServerTransport
 
 import argparse
 import datetime

@@ -8,19 +8,26 @@ from mcp_kipris.server import app
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from starlette.applications import Starlette
 from starlette.routing import Mount
+from contextlib import asynccontextmanager
 import uvicorn
 
 session_manager = StreamableHTTPSessionManager(
     app=app,
     event_store=None,
-    json_response=False,
+    json_response=True,
     stateless=True,
 )
+
+@asynccontextmanager
+async def lifespan(app):
+    async with session_manager.run():
+        yield
 
 async def handle_streamable_http(scope, receive, send):
     await session_manager.handle_request(scope, receive, send)
 
 starlette_app = Starlette(
+    lifespan=lifespan,
     routes=[
         Mount("/mcp", app=handle_streamable_http),
     ]
@@ -28,9 +35,9 @@ starlette_app = Starlette(
 
 if __name__ == "__main__":
     uvicorn.run(
-    starlette_app,
-    host="0.0.0.0",
-    port=6274,
-    proxy_headers=True,
-    forwarded_allow_ips="*"
-)
+        starlette_app,
+        host="0.0.0.0",
+        port=6274,
+        proxy_headers=True,
+        forwarded_allow_ips="*"
+    )

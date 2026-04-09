@@ -6,7 +6,7 @@ COPY ./pyproject.toml ./
 COPY ./requirements.txt ./
 COPY ./src/ /app/
 
-RUN pip install --upgrade pip && pip install -r requirements.txt && pip install "mcp[cli]"
+RUN pip install --upgrade pip && pip install -r requirements.txt && pip install "mcp[cli]" uvicorn starlette
 
 EXPOSE 6274
 

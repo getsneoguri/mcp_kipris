@@ -10,4 +10,4 @@ RUN pip install --upgrade pip && pip install -r requirements.txt && pip install 
 
 EXPOSE 6274
 
-CMD ["sh", "-c", "python -c \"\nimport sys\nsys.path.insert(0, '/app')\nfrom mcp_kipris.server import mcp\nmcp.run(transport='streamable-http', host='0.0.0.0', port=6274, path='/mcp')\n\""]
+CMD ["sh", "-c", "python /streamable_server.py"]

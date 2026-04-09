@@ -5,10 +5,9 @@ WORKDIR /app
 COPY ./pyproject.toml ./
 COPY ./requirements.txt ./
 COPY ./src/ /app/
-COPY ./streamable_server.py /streamable_server.py
 
 RUN pip install --upgrade pip && pip install -r requirements.txt && pip install "mcp[cli]"
 
 EXPOSE 6274
 
-CMD ["sh", "-c", "pip install 'mcp[cli]' && python /streamable_server.py"]
+CMD ["sh", "-c", "python -c \"\nimport sys\nsys.path.insert(0, '/app')\nfrom mcp_kipris.server import mcp\nmcp.run(transport='streamable-http', host='0.0.0.0', port=6274, path='/mcp')\n\""]

@@ -9,6 +9,4 @@ COPY ./streamable_server.py /streamable_server.py
 
 RUN pip install --upgrade pip && pip install -r requirements.txt && pip install "mcp[cli]" uvicorn starlette
 
-EXPOSE 6274
-
-CMD ["sh", "-c", "python /streamable_server.py"]
+CMD ["python", "/streamable_server.py"]

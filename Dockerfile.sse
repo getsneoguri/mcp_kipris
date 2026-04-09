@@ -10,4 +10,4 @@ RUN pip install --upgrade pip && pip install -r requirements.txt && pip install 
 
 EXPOSE 6274
 
-CMD ["sh", "-c", "pip show mcp && python -m mcp_kipris.sse_server --http --host 0.0.0.0 --port 6274"]
+CMD ["sh", "-c", "pip install 'mcp[cli]' && python -m mcp_kipris.streamable_server"]
